@@ -1,0 +1,49 @@
+---
+---
+
+@use 'abstracts/variables' with (
+  $theme: '{{ site.theme_mode }}',
+
+  // Yazı alanının ulaşabileceği en fazla genişlik.
+  // Görseller bu genişliğe kadar büyür. (tema varsayılanı: 1250px)
+  // Not: sadece 1650px'ten geniş ekranlarda devreye girer.
+  $main-content-max-width: 1600px
+);
+
+/* prettier-ignore */
+@use 'main
+{%- if jekyll.environment == 'production' -%}
+  .bundle
+{%- endif -%}
+';
+
+/* append your custom style below */
+
+// ---------------------------------------------------------------------
+// Tablo hücreleri satır sonu alabilsin.
+// Tema hepsine white-space: nowrap veriyor, bu yüzden uzun cümleli
+// hücreler tek satıra diziliyor ve tablo yatay kaydırma çubuğu açıyor.
+// ---------------------------------------------------------------------
+.content .table-wrapper > table {
+  thead th,
+  tbody tr td {
+    white-space: normal;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Yazı ile sağdaki "Contents" panelinin genişlik paylaşımı.
+// Toplamı 100 olmalı. (tema varsayılanı: 75% / 25%)
+// Sadece 1200px'ten geniş ekranlarda geçerli; daha darda Contents gizli.
+// ---------------------------------------------------------------------
+@media all and (min-width: 1200px) {
+  #main-wrapper .col-xl-9 {
+    flex: 0 0 auto;
+    width: 80%; // yazı alanı
+  }
+
+  #main-wrapper .col-xl-3 {
+    flex: 0 0 auto;
+    width: 20%; // Contents paneli
+  }
+}
