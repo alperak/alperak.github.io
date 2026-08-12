@@ -1,23 +1,21 @@
 ---
-title: "Secure Boot on the NXP FRDM i.MX93 - Part 1: The Bootloader (AHAB)"
-date: 2026-08-09 10:00:00 +0300
-categories: [Embedded Linux, U-Boot, Secure Boot, AHAB]
-tags: [embedded-linux, u-boot, secure-boot, ahab, nxp, imx93, spsdk]
+title: "Part 1: The Bootloader Chain (AHAB) - Embedded Linux Security on the NXP FRDM i.MX93"
+date: 2026-08-29 10:00:00 +0300
+categories: [Embedded Linux, Secure Boot]
+tags: [secure-boot, security, ahab, spsdk, u-boot, yocto, nxp, imx93, embedded-linux]
 ---
 
 A device is only as trustworthy as the software it boots. If an attacker can replace the earliest boot software stored on the boot media, every later stage of the system can no longer be trusted because it ultimately depends on that code. Once that first component is compromised, no software loaded afterward can establish trust on its own.
 
 Secure boot addresses exactly this problem by building a chain of trust from immutable hardware to the operating system. Instead of blindly executing whatever the boot media happens to contain, each stage is checked against the established chain of trust before it is allowed to run. If a check fails anywhere in the chain, execution stops before untrusted code can run.
 
-## What this guide builds
+## What this part builds
 
 In this first part, we focus on securing the bootloader. We enable AHAB on the NXP FRDM i.MX93, generate our own Super Root Keys (SRKs), sign the bootable image with NXP's Secure Provisioning SDK (SPSDK) and permanently bind the device to those SRKs by programming the SRK hash into the one-time programmable (OTP) fuses.
 
-In [Part 2: The Kernel (Signed FIT)](/posts/secure-boot-on-the-frdm-imx93-part-2-the-kernel-signed-fit/), we extend the chain of trust to the Linux kernel using U-Boot's FIT (Flattened Image Tree) mechanism.
+In [Part 2: The Kernel (Signed FIT)](/posts/embedded-linux-security-on-the-frdm-imx93-part-2-the-kernel-signed-fit/), we extend the chain of trust to the Linux kernel using U-Boot's FIT (Flattened Image Tree) mechanism.
 
-This guide uses the Yocto Project **Wrynose** LTS release together with NXP's `imx-6.18.20-2.0.0` BSP manifest.
-
-> **Source code:** The complete Yocto meta-layer used throughout this guide is available in the [`meta-frdm-imx93-security`](https://github.com/alperak/meta-frdm-imx93-security) repository. It contains the recipes, patches, configuration files and other build changes used to reproduce the secure boot setup described in both parts.
+> This series uses the Yocto Project **Wrynose 6.0 LTS** release with NXP's `imx-6.18.20-2.0.0` BSP manifest. The [`meta-frdm-imx93-security`](https://github.com/alperak/meta-frdm-imx93-security) layer holds the finished form of every recipe, patch, configuration file and build change these parts describe.
 
 ## AHAB on the i.MX93
 
@@ -33,7 +31,7 @@ The container signature protects the container metadata, including the container
 
 The following figure illustrates the general structure of an AHAB container:
 
-![The AHAB container structure: every container has the same shape, a header, a signature block holding the signature header, SRK table and signature, then its images. Containers 1 to 3 are stacked in one file and make up the bootable image: the ELE firmware signed by NXP against NXP's own SRK table, the SPL with the DDR firmware, and ATF with OP-TEE and U-Boot together under a single signature. Container 4 is the OS container, a separate file holding the Linux kernel and its device tree.](/assets/img/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/AHAB-structure-new.png){: width="1606" height="958" }
+![The AHAB container structure: every container has the same shape, a header, a signature block holding the signature header, SRK table and signature, then its images. Containers 1 to 3 are stacked in one file and make up the bootable image: the ELE firmware signed by NXP against NXP's own SRK table, the SPL with the DDR firmware, and ATF with OP-TEE and U-Boot together under a single signature. Container 4 is the OS container, a separate file holding the Linux kernel and its device tree.](/assets/img/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/AHAB-structure-new.png){: width="1606" height="958" }
 
 The bootable image is put together by `mkimage_imx8`. Three names are worth separating because they are easy to confuse: `imx-mkimage` is NXP's upstream project, holding a makefile per SoC, `mkimage_imx8` is the tool those makefiles run, and `imx-boot` is the Yocto recipe that drives the whole process. Although the bootable image is deployed as a single file, it actually contains three separate AHAB containers:
 
@@ -41,16 +39,16 @@ The bootable image is put together by `mkimage_imx8`. Three names are worth sepa
 - The **SPL + DDR firmware**, packaged in an AHAB container that the build leaves unsigned and that we sign with our own OEM key.
 - **ATF (BL31), OP-TEE and U-Boot + Device Tree**, packaged together in another AHAB container that the build leaves unsigned and that we sign with the same OEM key.
 
-The diagram also shows a fourth AHAB container, the **OS container**. Unlike the other three containers, it is not part of the bootable image and is not generated by the default Yocto build. Instead, we create it manually with `mkimage_imx8`, which packages the deployed kernel and device tree into an OS container.
+The diagram also shows a fourth AHAB container, the **OS container**. Unlike the other three containers, it is not part of the bootable image and is not generated by the default Yocto build. It is the container NXP's flow expects to carry the kernel and device tree, and `mkimage_imx8` can build one from a deployed kernel and device tree. This series does not use it.
 
-OEM stands for *Original Equipment Manufacturer*, the company that builds a product around the chip. In this guide, that is us. In this configuration, AHAB separates the trust domains into two key owners: NXP and the OEM. This is reflected in the fuse banks, container fields and lifecycle states.
+OEM stands for *Original Equipment Manufacturer*, the company that builds a product around the chip. In this series, that is us. In this configuration, AHAB separates the trust domains into two key owners: NXP and the OEM. This is reflected in the fuse banks, container fields and lifecycle states.
 
-Whenever this guide refers to an **OEM container**, it simply means an AHAB container authenticated against the fused `OEM_SRKH`.
+Whenever this series refers to an **OEM container**, it simply means an AHAB container authenticated against the fused `OEM_SRKH`.
 
 The ELE authenticates different containers against different SRK hashes. It uses two independent trust anchors and the device contains a separate fuse bank for each:
 
-- `ELE_SRKH` (fuses 64–71) stores NXP's SRK hash and is programmed during manufacturing.
-- `OEM_SRKH` (fuses 128–135) stores the OEM SRK hash, which we will program ourselves.
+- `ELE_SRKH` (fuses 64-71) stores NXP's SRK hash and is programmed during manufacturing.
+- `OEM_SRKH` (fuses 128-135) stores the OEM SRK hash, which we will program ourselves.
 
 The `ELE_SRKH` bank is used only to authenticate the ELE firmware. The `OEM_SRKH` bank is used to authenticate every OEM container. Because these two fuse banks are independent, programming the OEM SRK hash cannot affect the authentication of the ELE firmware.
 
@@ -58,9 +56,9 @@ In the default Yocto build, none of these mechanisms are enabled. The standard b
 
 ## The chain of trust on the i.MX93
 
-The following diagram summarizes the complete chain of trust on the i.MX93. It also shows where our FIT based approach diverges from NXP's default OS container flow.
+The following diagram summarizes the complete boot chain of trust on the i.MX93. It also shows where our FIT based approach diverges from NXP's default OS container flow.
 
-![Chain of trust on the FRDM i.MX93. The root of trust is the Boot ROM, the ELE ROM and the ELE_SRKH and OEM_SRKH fuse banks. From there each stage is authenticated before it runs: the ELE ROM authenticates the ELE firmware against NXP's SRK hash, the Boot ROM has the ELE firmware authenticate the SPL and DDR firmware, and the SPL requests the ELE firmware to authenticate ATF, OP-TEE and U-Boot. That container also carries u-boot.dtb, which holds the FIT public key. From there the chain forks. The default NXP route is the OS container, authenticated by the ELE firmware. The route we take is a signed FIT image, verified by U-Boot with that embedded key. Both reach Linux, which runs only if every stage above it passed](/assets/img/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/chain-of-trust-new.png){: width="1388" height="949" }
+![Chain of trust on the FRDM i.MX93. The root of trust is the Boot ROM, the ELE ROM and the ELE_SRKH and OEM_SRKH fuse banks. From there each stage is authenticated before it runs: the ELE ROM authenticates the ELE firmware against NXP's SRK hash, the Boot ROM has the ELE firmware authenticate the SPL and DDR firmware, and the SPL requests the ELE firmware to authenticate ATF, OP-TEE and U-Boot. That container also carries u-boot.dtb, which holds the FIT public key. From there the chain forks. The default NXP route is the OS container, authenticated by the ELE firmware. The route we take is a signed FIT image, verified by U-Boot with that embedded key. Both reach Linux, which runs only if every stage above it passed](/assets/img/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/chain-of-trust-new.png){: width="1388" height="949" }
 
 ## Why we use FIT instead of the OS container
 
@@ -70,7 +68,7 @@ The key difference is where the kernel is checked. With an OS container, the ELE
 
 The public key used for FIT verification is embedded in U-Boot's control device tree, which is itself authenticated as part of the bootable image. The root of trust stays the same. Only the component performing the final check changes, from the ELE firmware to U-Boot. Choosing FIT favors flexibility and portability while preserving the same security model.
 
-In [Part 2](/posts/secure-boot-on-the-frdm-imx93-part-2-the-kernel-signed-fit/#why-we-choose-fit-over-the-os-container), I explain the reasoning behind this choice in more detail.
+In [Part 2](/posts/embedded-linux-security-on-the-frdm-imx93-part-2-the-kernel-signed-fit/#why-we-choose-fit-over-the-os-container), I explain the reasoning behind this choice in more detail.
 
 ## 1. Initialize the BSP
 
@@ -113,11 +111,17 @@ sed -i '1i MACHINE = "frdm-imx93-secure"' conf/local.conf
 
 ## 5. Build the default image
 
-Build an image with `bitbake imx-image-core`. At this point, our layer only provides the `frdm-imx93-secure.conf` machine configuration, which simply inherits from the `imx93-11x11-lpddr4x-frdm` machine in `meta-imx-bsp`. No other changes have been introduced yet. Building the image at this stage confirms that the new layer and machine configuration integrate cleanly before we start adding secure boot modifications.
+Build the image:
+
+```bash
+bitbake imx-image-core
+```
+
+At this point, our layer only provides the `frdm-imx93-secure.conf` machine configuration, which simply inherits from the `imx93-11x11-lpddr4x-frdm` machine in `meta-imx-bsp`. No other changes have been introduced yet. Building the image at this stage confirms that the new layer and machine configuration integrate cleanly before we start adding secure boot modifications.
 
 ## 6. Set up Python environment and install SPSDK
 
-This guide uses NXP's Secure Provisioning SDK (SPSDK) tool, which covers the entire flow: `nxpcrypto` for key generation, `nxpimage` for container signing, `nxpele` for fuse programming and `nxpuuu` for flashing. The version is pinned to ensure the commands and outputs shown in this guide remain reproducible.
+This series uses NXP's Secure Provisioning SDK (SPSDK) tool, which covers the entire flow: `nxpcrypto` for key generation, `nxpimage` for container signing, `nxpele` for fuse programming and `nxpuuu` for flashing. The version is pinned to ensure the commands and outputs shown in this series remain reproducible.
 
 ```bash
 python3 -m venv ~/py_envs
@@ -127,10 +131,10 @@ pip install spsdk==3.10.0
 
 ## 7. Flash the default image and confirm it boots
 
-This guide uses eMMC rather than an SD card. Flashing is performed with `nxpuuu`. Set the board's boot mode switches to Serial Download Mode, power-cycle or reset the board and run `nxpuuu list-devices` from the host to confirm that the board is detected. The generated bootable image and full system image can be found in the Yocto deploy directory under `tmp/deploy/images/frdm-imx93-secure/`. Then flash both in a single step:
+In this series, we will use eMMC instead of an SD card and flashing will be performed using `nxpuuu`. Set the board's boot mode switches to Serial Download Mode, power-cycle or reset the board and run `nxpuuu list-devices` from the host to confirm that the board is detected. The generated bootable image and full system image can be found in the Yocto deploy directory under `tmp/deploy/images/frdm-imx93-secure/`. Then flash both in a single step:
 
 ```bash
-nxpuuu write -b emmc_all imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot imx-image-core-frdm-imx93-secure.rootfs-<date>.wic.zst
+nxpuuu write -b emmc_all imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot imx-image-core-frdm-imx93-secure.rootfs-<timestamp>.wic.zst
 ```
 
 Once flashing completes, return the boot mode switches to eMMC Boot and power-cycle or reset the board. If Linux boots successfully, the baseline system is working correctly and we are ready to continue.
@@ -210,13 +214,13 @@ Authenticate OS container is failed
 u-boot=>
 ```
 
-To understand why enabling `CONFIG_AHAB_BOOT` immediately changed the boot behavior, we need to look at the U-Boot environment used by our BSP. For the FRDM i.MX93 board, it is defined in `board/nxp/imx93_frdm/imx93_frdm.env` in NXP's `uboot-imx` repository, matching the U-Boot revision used in this guide. [imx93_frdm.env (lf_v2026.04)](https://github.com/nxp-imx/uboot-imx/blob/6eeef838dac4ddbc06ff14450531a95e8c5cb346/board/nxp/imx93_frdm/imx93_frdm.env)
+To understand why enabling `CONFIG_AHAB_BOOT` immediately changed the boot behavior, we need to look at the U-Boot environment used by our BSP. For the FRDM i.MX93 board, it is defined in `board/nxp/imx93_frdm/imx93_frdm.env` in NXP's `uboot-imx` repository, matching the U-Boot revision used in this series. [imx93_frdm.env (lf_v2026.04)](https://github.com/nxp-imx/uboot-imx/blob/6eeef838dac4ddbc06ff14450531a95e8c5cb346/board/nxp/imx93_frdm/imx93_frdm.env)
 
 As the environment file shows, enabling `CONFIG_AHAB_BOOT` automatically sets `sec_boot=yes`. That changes the execution path inside `bsp_bootcmd`. Instead of loading the kernel directly, U-Boot first calls `loadcntr` to load `os_cntr_signed.bin` (OS container) at `cntr_addr`, then invokes `auth_os` before booting Linux.
 
 `auth_os` is not a separate authentication implementation. In this environment, it expands to `booti ${cntr_addr}`. When `CONFIG_AHAB_BOOT` is enabled, the NXP implementation of `booti` adds an AHAB specific path: it requests the ELE firmware to authenticate the OS container at `${cntr_addr}` before continuing with the container's contents. In other words, enabling `CONFIG_AHAB_BOOT` changes both the default environment and the behavior of `booti`.
 
-At this point we had enabled `CONFIG_AHAB_BOOT`, but we had not yet created an `os_cntr_signed.bin`. As a result, `loadcntr` failed and `bsp_bootcmd` fell back to `netboot`, which has its own `sec_boot` path and still calls `auth_os`. That is why the log first shows the BOOTP attempts and then the authentication message. `auth_os` eventually executes `booti ${cntr_addr}`, causing U-Boot to enter its AHAB path for the image at `0x98000000`. Since no valid OS container was present at that address, the process stopped immediately with `Error: Wrong container header`.
+At this point we had enabled `CONFIG_AHAB_BOOT`, but we had not created an `os_cntr_signed.bin`. As a result, `loadcntr` failed and `bsp_bootcmd` fell back to `netboot`, which has its own `sec_boot` path and still calls `auth_os`. That is why the log first shows the BOOTP attempts and then the authentication message. `auth_os` eventually executes `booti ${cntr_addr}`, causing U-Boot to enter its AHAB path for the image at `0x98000000`. Since no valid OS container was present at that address, the process stopped immediately with `Error: Wrong container header`.
 
 Although the boot failed, this is exactly the behavior we expected. Reaching this point confirms that U-Boot is following the AHAB authentication path.
 
@@ -243,7 +247,7 @@ Before programming the SRK hash into the fuses, note the output. `ELE_OEM_CNTN_A
 
 ## 9. Create the SRKs (Super Root Keys)
 
-Now generate the four SRKs. These keys become the device's long-term root of trust, so losing the private keys means you can no longer produce bootable images that existing devices will accept. To avoid misplacing them, I created a dedicated `artifacts-and-tools` directory and will keep these keys together with the other generated artifacts there throughout this guide. Use `nxpcrypto` to create the four RSA-4096 key pairs:
+Now generate the four SRKs. The hash of these keys becomes the device's permanent trust anchor once it is programmed into the fuses, so losing the private keys means you can no longer produce bootable image that existing devices will accept. To avoid misplacing them, I created a dedicated `artifacts-and-tools` directory and will keep these keys together with the other generated artifacts there throughout this series. Use `nxpcrypto` to create the four RSA-4096 key pairs:
 
 ```bash
 for i in 0 1 2 3; do
@@ -251,19 +255,21 @@ for i in 0 1 2 3; do
 done
 ```
 
-Although only one SRK is normally used for signing, the remaining keys provide a built-in recovery mechanism. If the active signing key is ever compromised, future bootable images can be signed with another SRK while the compromised key is permanently revoked. Devices updated with the replacement key can then reject images signed with the revoked key.
+Although only one SRK is normally used for signing, the remaining keys provide a built-in recovery mechanism. If the active signing key is ever compromised, future bootable image can be signed with another SRK while the compromised key is permanently revoked. Devices updated with the replacement key can then reject images signed with the revoked key.
 
-This mechanism is finite: only four SRKs are available and there is no way to add a fifth later. If all four private keys are lost, not compromised but simply lost, no future bootable image can ever be signed for devices programmed with the corresponding SRK hash. Because the fused SRK hash cannot be changed, losing all four keys effectively marks the end of the trusted software lifecycle for those devices. Store these keys securely and treat them as long-term assets.
+This mechanism is finite: only four SRKs are available and there is no way to add a fifth later. Losing all four private keys therefore ends the trusted software lifecycle for every device fused with their hash. Store these keys securely and treat them as long term assets.
 
-> **A note on keys and production.** For simplicity, this guide generates the SRKs as PEM files on a development machine so that every step remains visible and reproducible. Production systems should not work this way. Private keys should be generated and protected inside an HSM or another controlled key management system and should not be stored as exportable files. SPSDK supports HSM backed signing through its Signature Provider mechanism, including the [`spsdk-pkcs11`](https://pypi.org/project/spsdk-pkcs11/) plugin for HSMs that expose a PKCS#11 interface. The signing process remains the same, only the location and protection of the private key change.
+> **A note on keys and production.** For simplicity, this part generates the SRKs as PEM files on a development machine so that every step remains visible and reproducible. Production systems should not work this way. Private keys should be generated and protected inside an HSM or another controlled key management system and should not be stored as exportable files. SPSDK supports HSM backed signing through its Signature Provider mechanism, including the [`spsdk-pkcs11`](https://pypi.org/project/spsdk-pkcs11/) plugin for HSMs that expose a PKCS#11 interface. The signing process remains the same, only the location and protection of the private key change.
 >
-> This distinction is especially important for secure boot because fuse programming is permanent. Once the SRK hash has been programmed into the device, the root keys cannot be replaced later. For that reason, production devices should be fused using keys that are generated and managed according to a proper key management process from the beginning.
->
-> The same principle applies to the kernel signing key discussed in [Part 2](/posts/secure-boot-on-the-frdm-imx93-part-2-the-kernel-signed-fit/). Unlike the SRKs, the FIT signing key can be rotated by updating the bootable image, which replaces the public key embedded in U-Boot.
+> This matters more for secure boot than for most signing keys, because the SRK hash is fused permanently. Production devices should therefore be fused using keys that are generated and managed according to a proper key management process from the beginning.
 
 ## 10. Create the signing template
 
-Now that the keys have been created, we can create the signing template. First we look at the supported SoC families by running `nxpimage ahab get-families -c get-template`:
+Now that the keys have been created, we can create the signing template. First we look at the supported SoC families:
+
+```bash
+nxpimage ahab get-families -c get-template
+```
 
 ```console
 Shown families for command 'get-template':
@@ -290,7 +296,7 @@ mx943[a0]                mx952[a0]                mx95[a0,a1,b0]
 rt118x[a0,b0]       
 ```
 
-Our SoC family is `mimx9352`, which has two silicon revisions: `a0` and `a1`. This is reflected in the `get-families` output as `mimx9352[a0,a1]`. The Yocto BSP used in this guide targets the `a1` silicon revision. This is defined in `imx-base.inc`, where `IMX_SOC_REV:mx93-generic-bsp` is set to `A1`. The `imx-boot` recipe then passes this value to `imx-mkimage` as `REV=${IMX_SOC_REV_UPPER}`, which produces the `mx93a1-ahab-container.img` (ELE firmware container) included in the build. So we use `a1` throughout this guide.
+Our SoC family is `mimx9352`, which has two silicon revisions: `a0` and `a1`. This is reflected in the `get-families` output as `mimx9352[a0,a1]`. The Yocto BSP used in this series targets the `a1` silicon revision. This is defined in `imx-base.inc`, where `IMX_SOC_REV:mx93-generic-bsp` is set to `A1`. The `imx-boot` recipe then passes this value to `imx-mkimage` as `REV=${IMX_SOC_REV_UPPER}`, which produces the `mx93a1-ahab-container.img` (ELE firmware container) included in the build. So we use `a1` throughout this series.
 
 Now we generate the template:
 
@@ -480,7 +486,7 @@ One small detail is worth noting. The `signer` and `srk_array` paths are resolve
 
 ## 11. Sign, verify and parse the bootable image
 
-The signing configuration is now complete, so the next step is to bring in the bootable image we want to sign. Yocto has already built it as `imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot`. We copy it from the deploy directory into the `artifacts-and-tools` directory we created in [section 9](#9-create-the-srks-super-root-keys). So, that the signing configuration , keys and bootable image are all kept together.
+The signing configuration is now complete, so the next step is to bring in the bootable image we want to sign. Yocto has already built it as `imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot`. We copy it from the deploy directory into the `artifacts-and-tools` directory we created in [section 9](#9-create-the-srks-super-root-keys), so that the signing configuration, keys and bootable image are all kept together.
 
 Now we sign it:
 
@@ -511,7 +517,7 @@ After signing, it is a good idea to check the result before we touch any hardwar
 nxpimage -v ahab verify -f mimx9352 -b signed-flash.bin
 ```
 
-You might see `Overall result: Warning` and that is fine. The summary counts 368 succeeded, 1 warning and 0 errors. That single warning sits on the ELE firmware container signed by NXP and reads `Decrypted data(Warning): The NXP image can't be verified`. That image is encrypted and SPSDK does not have NXP's key, so it cannot verify it and reports the warning. Our OEM containers verifies successfully without any warnings or errors.
+You might see `Overall result: Warning` and that is fine. The summary counts 368 succeeded, 1 warning and 0 errors. That single warning sits on the ELE firmware container signed by NXP and reads `Decrypted data(Warning): The NXP image can't be verified`. That image is encrypted and SPSDK does not have NXP's key, so it cannot verify it and reports the warning. But, our OEM containers verified successfully without any warnings or errors.
 
 If you want to look inside the signed bootable image, you can also parse it. This extracts the AHAB containers together with their images and the SRK public keys, allowing you to compare the extracted keys with the ones you originally generated.
 
@@ -523,7 +529,7 @@ nxpimage -v ahab parse -f mimx9352 -b signed-flash.bin -o parsed
 
 Now we flash the signed bootable image into the board and confirm that the ELE firmware successfully processes the signature. We do this before programming any fuses, so no permanent changes have been made yet.
 
-We flash `signed-flash.bin` rather than the unsigned bootable image Yocto produced because only the signed one carries the OEM container signatures. Set the board's boot mode switches to Serial Download Mode, power-cycle or reset the board and run `nxpuuu list-devices` from the host to confirm that the board is detected. Then flash the signed bootable image:
+Set the board's boot mode switches to Serial Download Mode, power-cycle or reset the board and run `nxpuuu list-devices` from the host to confirm that the board is detected. Then flash the signed bootable image:
 
 ```bash
 nxpuuu write -b emmc signed-flash.bin
@@ -578,7 +584,7 @@ Only one field changed, the `IND` field, which is the result of the authenticati
 
 This change tells us exactly what happened. Before signing, the ELE firmware received an authentication request but found no signed OEM containers, so no authentication was performed. After signing, it authenticated the OEM containers by hashing the SRK table each one carries and comparing the result with the `OEM_SRKH` fuses. Since those fuses are still unprogrammed, the comparison fails and the ELE firmware reports `ELE_BAD_KEY_HASH_FAILURE_IND`. This is the expected result because we have not yet programmed the SRK hash into the device.
 
-The lifecycle remains `OEM Open`, so the board continues booting despite the authentication failure. The device only rejects an unauthenticated bootable image after it has been transitioned to the `OEM Closed` lifecycle state, which we will do later in this guide.
+The lifecycle remains `OEM Open`, so the board continues booting despite the authentication failure. The device only rejects an unauthenticated bootable image after it has been transitioned to the `OEM Closed` lifecycle state, which we will do it later.
 
 ## 13. Read the fuse scripts before you run one
 
@@ -627,7 +633,7 @@ Two scripts are generated, one for each OEM container but they are identical bec
 
 This step programs the SRK hash into the device's one-time programmable (OTP) fuses. After this, the device permanently records the hash of the trusted SRK table used to authenticate OEM containers.
 
-> ⚠️ **This step is permanent.** OTP fuses can only be programmed once. If the wrong SRK hash is written to the `OEM_SRKH` fuses, it cannot be corrected later. The device will permanently trust only the SRK table whose hash is fused and generating new SRKs will not help because the hardware root of trust cannot be changed. Verify the generated fuse values carefully before programming them.
+> ⚠️ **This step is permanent.** OTP fuses can only be programmed once, so a wrong `OEM_SRKH` value cannot be corrected later. The device will then accept only the SRK table whose hash matches that value and generating new SRKs does not help because every OEM container is checked against the hash already in the fuses. Verify the generated fuse values carefully before programming them.
 >
 > Programming the SRK hash alone does not enforce secure boot. As long as the device remains in the `OEM Open` lifecycle state, authentication failures are reported but not enforced, so the board can still boot images that fail authentication. Enforcement begins only after the lifecycle is transitioned to `OEM Closed`. We keep the device in `OEM Open` for now, making it safe to verify the complete secure boot flow before permanently enabling enforcement.
 
@@ -641,7 +647,7 @@ Before running any `nxpele` command:
 - Close your serial terminal to release `/dev/ttyACM0`.
 - Run the `nxpele` command from the host inside the Python virtual environment where SPSDK is installed. The command communicates with U-Boot over the serial port and prints its output directly in the host terminal.
 
-This guide uses the `uboot_serial` communication method throughout and the `-d uboot_serial` option in the commands below selects it explicitly. The option is required because SPSDK defines a default communication method for each supported device. For mimx9352 (our SoC), that default is `uboot_fastboot`. If `-d uboot_serial` is omitted, `nxpele` will use `uboot_fastboot` instead. That communication method uses U-Boot's Fastboot interface over USB and requires console multiplexing (`CONFIG_CONSOLE_MUX`) in addition to AHAB support (`CONFIG_AHAB_BOOT`), both of which this BSP already enables. It also requires interrupting autoboot, entering the U-Boot console and manually starting the `fastboot 0` service before executing any host side `nxpele` command.
+In this series, we use the `uboot_serial` communication method throughout and the `-d uboot_serial` option in the commands below selects it explicitly. The option is required because SPSDK defines a default communication method for each supported device. For mimx9352 (our SoC), that default is `uboot_fastboot`. If `-d uboot_serial` is omitted, `nxpele` will use `uboot_fastboot` instead. That communication method uses U-Boot's Fastboot interface over USB and requires console multiplexing (`CONFIG_CONSOLE_MUX`) in addition to AHAB support (`CONFIG_AHAB_BOOT`), both of which are enabled in this build. It also requires interrupting autoboot, entering the U-Boot console and manually starting the `fastboot 0` service before executing any host side `nxpele` command.
 
 Knowing which communication method is active avoids confusing failures during operations such as fuse programming.
 
@@ -760,9 +766,9 @@ Fuse ID_135: 0x00000000
 
 ### Step 2: Program the SRK hash (run only one script)
 
-The generated scripts `ahab_oem0_srk0_hash_nxpele.bcf` and `ahab_oem1_srk0_hash_nxpele.bcf`, created in [section 11](#11-sign-verify-and-parse-the-bootable-image), contain the same SRK hash values. Both OEM containers carry the same SRK table and the device has only one `OEM_SRKH` fuse bank. Therefore, only one of these scripts needs to be executed.
+The generated scripts `ahab_oem0_srk0_hash_nxpele.bcf` and `ahab_oem1_srk0_hash_nxpele.bcf`, created in [section 11](#11-sign-verify-and-parse-the-bootable-image), contain the same SRK hash values. Both OEM containers carry the same SRK table and the device has only one `OEM_SRKH` fuse bank. Therefore, only one of these scripts needs to be executed. Also, your `.bcf` script values will differ from mine because we don't use the same SRKs. The outputs I will provide below is my own, for example purposes.
 
-⚠️This is a permanent operation. Verify all values carefully before proceeding. Fuse programming cannot be undone.⚠️
+⚠️This is the irreversible step. Verify all values carefully before proceeding. Fuse programming cannot be undone.⚠️
 
 ```bash
 nxpele -p /dev/ttyACM0 -d uboot_serial -f mimx9352 -v batch fuse_scripts/ahab_oem0_srk0_hash_nxpele.bcf
@@ -861,7 +867,7 @@ for i in $(seq 128 135); do
 done
 ```
 
-Verify that the values read back from the device match the values in your generated `ahab_oem0_srk0_hash_nxpele.bcf` (or `ahab_oem1_srk0_hash_nxpele.bcf`) file. Specifically, confirm that every value from `Fuse ID_128` through `Fuse ID_135` matches the corresponding `OEM_SRKH0` through `OEM_SRKH7` entries. The values shown in this guide are only examples and will differ because you generated your own SRKs. All eight fuse values must match before continuing.
+Verify that the values read back from the device match the values in your generated `ahab_oem0_srk0_hash_nxpele.bcf` file. Specifically, confirm that every value from `Fuse ID_128` through `Fuse ID_135` matches the corresponding `OEM_SRKH0` through `OEM_SRKH7` entries.
 
 Here is my output:
 
@@ -970,7 +976,7 @@ Fuse ID_135: 0x03F3E388
 
 ### Step 4: Reboot and check ahab_status
 
-A reboot is required because `ahab_status` reports the authentication events from the previous boot. Programming the fuses does not clear events that have already been recorded.
+A reboot is required because `ahab_status` reports the authentication events recorded when the board started. Programming the fuses does not clear events that have already been recorded.
 
 Reconnect your serial terminal, power cycle or reset the board, stop at the U-Boot prompt and run:
 
@@ -994,16 +1000,16 @@ The AHAB part of the secure boot chain is now complete. The ELE firmware authent
 
 There is one final step but we do not perform it in this part.
 
-The device is still in the `OEM Open` lifecycle state. In this state, the ELE firmware authenticates every OEM container but authentication failures are only reported. Moving the device to `OEM Closed` changes that behavior. From then on, the device boots only bootable images whose OEM containers can be successfully authenticated.
+The device is still in the `OEM Open` lifecycle state. In this state, the ELE firmware authenticates every OEM container but authentication failures are only reported. Moving the device to `OEM Closed` changes that behavior. From then on, the device boots only bootable image whose OEM containers can be successfully authenticated.
 
 The lifecycle can only move forward, from `OEM Open` to `OEM Closed` and the transition is irreversible.
 
-We will move the device to the `OEM Closed` lifecycle state in [section 10 of Part 2](/posts/secure-boot-on-the-frdm-imx93-part-2-the-kernel-signed-fit/#10-move-the-device-to-the-oem-closed-lifecycle), after both OEM container authentication and FIT signature verification have been confirmed.
+We will move the device to the `OEM Closed` lifecycle state in [section 10 of Part 2](/posts/embedded-linux-security-on-the-frdm-imx93-part-2-the-kernel-signed-fit/#10-move-the-device-to-the-oem-closed-lifecycle), after both OEM container authentication and FIT signature verification have been confirmed.
 
 ## 16. Where we are and what comes next
 
 At this point, the secure boot chain now reaches U-Boot. We signed the bootable image, programmed the SRK hash into the fuses and the ELE firmware now authenticates the boot components successfully on every boot without reporting security events.
 
-But the chain stops at U-Boot. Right now U-Boot would still boot any kernel it is given. To carry the trust boundary one step further into Linux, U-Boot must verify the kernel before handing execution to it. As decided earlier, we do this with a signed FIT image instead of an OS container.
+But the chain stops at U-Boot. Right now U-Boot would still boot any kernel it is given. To carry the trust boundary one step further, U-Boot must verify the kernel before handing execution to it. As decided earlier, we do this with a signed FIT image instead of an OS container.
 
-Continue to [Part 2: The Kernel (Signed FIT)](/posts/secure-boot-on-the-frdm-imx93-part-2-the-kernel-signed-fit/)
+Continue to [Part 2: The Kernel (Signed FIT)](/posts/embedded-linux-security-on-the-frdm-imx93-part-2-the-kernel-signed-fit/)

@@ -1,33 +1,35 @@
 ---
-title: "Secure Boot on the NXP FRDM i.MX93 - Part 2: The Kernel (Signed FIT)"
-date: 2026-08-09 11:00:00 +0300
-categories: [Embedded Linux, U-Boot, Secure Boot, FIT Image]
-tags: [embedded-linux, u-boot, secure-boot, fit-image, linux-kernel, nxp, imx93]
+title: "Part 2: The Kernel (Signed FIT) - Embedded Linux Security on the NXP FRDM i.MX93"
+date: 2026-08-29 11:00:00 +0300
+categories: [Embedded Linux, Secure Boot]
+tags: [secure-boot, security, fit-image, linux-kernel, u-boot, yocto, nxp, imx93, embedded-linux]
 ---
 
-In [Part 1: The Bootloader (AHAB)](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/), we built the first part of the chain of trust. The Boot ROM loaded the ELE firmware, the ELE ROM authenticated the ELE firmware against NXP's fused SRK hash and the ELE firmware authenticated the OEM containers against the OEM SRK hash we programmed into the fuses.
+In [Part 1: The Bootloader Chain (AHAB)](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/), we built the first part of the chain of trust. The Boot ROM loaded the ELE firmware, the ELE ROM authenticated the ELE firmware against NXP's fused SRK hash and the ELE firmware authenticated the OEM containers against the OEM SRK hash we programmed into the fuses.
 
-![Where Part 1 left us: the root of trust is the Boot ROM, the ELE ROM and the fuses, and from there the ELE firmware authenticates the SPL with the DDR firmware and then ATF, OP-TEE and U-Boot, all signed with our SRKs. The chain then breaks, because nothing checks the Linux kernel and device tree, which are whatever happens to be on the eMMC](/assets/img/posts/secure-boot-on-the-frdm-imx93-part-2-the-kernel-signed-fit/part2-the-gap.png){: width="1657" height="361" }
+![Where Part 1 left us: the root of trust is the Boot ROM, the ELE ROM and the fuses, and from there the ELE firmware authenticates the SPL with the DDR firmware and then ATF, OP-TEE and U-Boot, all signed with our SRKs. The chain then breaks, because nothing checks the Linux kernel and device tree, which are whatever happens to be on the eMMC](/assets/img/posts/embedded-linux-security-on-the-frdm-imx93-part-2-the-kernel-signed-fit/part2-the-gap.png){: width="1657" height="361" }
 
-At that point, the chain of trust ended at U-Boot. Although the bootable image containing U-Boot had been authenticated by the ELE firmware, the Linux kernel was still loaded directly from storage without any independent verification by U-Boot.
+At that point, the chain of trust ended at U-Boot. Although the bootable image containing U-Boot had been authenticated by the ELE firmware, nothing in the chain verified the Linux kernel itself.
 
 ## What this part builds
 
-In this part, we extend the chain of trust to the Linux kernel by protecting it with a signed FIT (Flattened Image Tree). We will build and sign the FIT image, embed the FIT public key into U-Boot's control device tree, modify the boot flow so U-Boot verifies the FIT image before booting Linux, and finally show that tampered and unsigned FIT images are rejected.
+In this part, we extend the chain of trust to the Linux kernel by protecting it with a signed FIT (Flattened Image Tree). We will build and sign the FIT image, embed the FIT public key into U-Boot's control device tree, modify the boot flow so U-Boot verifies the FIT image before booting Linux and finally show that U-Boot rejects FIT images that are tampered with, unsigned or signed with an untrusted key.
+
+> This series uses the Yocto Project **Wrynose 6.0 LTS** release with NXP's `imx-6.18.20-2.0.0` BSP manifest. The [`meta-frdm-imx93-security`](https://github.com/alperak/meta-frdm-imx93-security) layer holds the finished form of every recipe, patch, configuration file and build change these parts describe.
 
 ## Why we choose FIT over the OS container
 
-When AHAB is enabled, NXP's default boot flow expects the kernel and device tree to be provided in a signed OS container (`os_cntr_signed.bin`). U-Boot loads this container with `loadcntr`, then `auth_os` requests the ELE firmware to authenticate it and only continues if the authentication succeeds. We already saw this path in [section 8 of Part 1](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/#8-enable-ahab-in-u-boot-and-read-ahab_status), where `loadcntr` searched for `os_cntr_signed.bin`.
+When AHAB is enabled, NXP's default boot flow expects the kernel and device tree to be provided in a signed OS container (`os_cntr_signed.bin`). U-Boot loads this container with `loadcntr`, then `auth_os` requests the ELE firmware to authenticate it and only continues if the authentication succeeds. We already saw this path in [section 8 of Part 1](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/#8-enable-ahab-in-u-boot-and-read-ahab_status), where `loadcntr` searched for `os_cntr_signed.bin`.
 
-In this guide, we take a different approach. Instead of packaging the kernel and device tree in an OS container, we keep them in a signed U-Boot FIT image and let U-Boot verify that image before booting Linux. The underlying hardware root of trust does not change. The difference is only where the kernel is checked. The OS container is authenticated by the ELE firmware, while a FIT image is verified by U-Boot using a public key embedded in U-Boot's control device tree. That control device tree is itself authenticated as part of the OEM container that carries U-Boot, so the chain of trust naturally extends from the ELE firmware to U-Boot and finally to the Linux kernel.
+In this series, we take a different approach. Instead of packaging the kernel and device tree in an OS container, we keep them in a signed U-Boot FIT image and let U-Boot verify that image before booting Linux. The underlying hardware root of trust does not change. The difference is only where the kernel is checked. The OS container is authenticated by the ELE firmware, while a FIT image is verified by U-Boot using a public key embedded in U-Boot's control device tree. That control device tree is itself authenticated as part of the OEM container that carries U-Boot, so the chain of trust naturally extends from the ELE firmware to U-Boot and finally to the Linux kernel.
 
 The reasons for choosing FIT are:
 
 - **A standard, portable mechanism.** FIT verification is a mainline U-Boot feature rather than an NXP specific one, so the same concepts, tooling and boot flow can be carried to other platforms.
 
-- **One signed image, many targets.** A FIT can contain multiple kernels, device trees and other boot artifacts, with each configuration selecting a specific combination of them. Each configuration can be signed and verified as a unit. This gives us a natural way to support multiple board variants or boot configurations without creating a separate FIT format for each combination.
+- **One signed image, many targets.** A FIT image can hold several kernels and device trees, with each configuration selecting one valid combination, so a single signed image can cover multiple board variants.
 
-- **A natural fit for future extensions.** A FIT can carry additional boot artifacts alongside the kernel, such as an initramfs or other firmware images, and a configuration can reference the artifacts that belong together. The configuration signature covers that configuration together with the hashes of the images it references, while U-Boot verifies those hashes against the image data. This gives us a flexible foundation for extending the verified boot chain without introducing a separate verification mechanism for every additional artifact.
+- **A natural fit for future extensions.** A FIT image can also carry artifacts beyond the kernel and device tree, such as an initramfs or additional firmware, so extending the verified boot chain does not require a separate verification mechanism for each new artifact.
 
 ## Inside a signed FIT image
 
@@ -35,7 +37,7 @@ The Linux kernel is protected by a signed FIT (Flattened Image Tree) image. Like
 
 A FIT image is described by an `.its` (Image Tree Source) file, which U-Boot refers to as an **image source file**. It uses device tree syntax and is processed by `dtc`, but instead of describing hardware, it describes the images that make up the FIT. The Yocto build generates this file automatically when we build the image in [section 5](#5-build-the-signed-fit-image) and `fit-image.its` will appear in the deploy directory. The example below has been trimmed to a single device tree so that it fits on the page.
 
-```dts
+```c
 /dts-v1/;
 
 / {
@@ -104,41 +106,39 @@ The table below summarizes the most relevant fields:
 The FIT has only two top level sections and understanding the difference between them is the key to understanding how FIT verification works:
 
 - The `images` section contains the individual images together with the metadata and hashes used to verify each of them.
-- The `configurations` section defines valid combinations of those images. Each configuration references the image nodes it uses. In the default and recommended configuration used throughout this guide, the configuration node carries the signature, while the individual image nodes carry only hashes.
+- The `configurations` section defines valid combinations of those images. Each configuration references the image nodes it uses. In the default and recommended configuration used throughout this series, the configuration node carries the signature, while the individual image nodes carry only hashes.
 
-U-Boot first verifies the configuration signature and then verifies every referenced image against the hashes protected by that signature. So the kernel and device tree carry hashes rather than signatures of their own.
+U-Boot first verifies the configuration signature and then verifies every referenced image against the hashes protected by that signature.
 
 The configuration signature is verified with a public key stored in U-Boot's control device tree, not the Linux device tree. This is the `u-boot.dtb` that we will inspect in [section 6](#6-verify-the-fit-signature-before-you-flash). When that key is marked `required`, U-Boot refuses to boot a FIT image whose configuration signature cannot be verified.
 
 ### Why the configuration is signed instead of the images
 
-U-Boot's own documentation is direct about the reason. Signing the individual images sounds more thorough but leaves two holes open:
+U-Boot's own documentation is direct about the reason. Signing the individual images sounds more thorough but the documentation is explicit that it does not provide complete protection and identifies two attacks that remain possible:
 
-- The first is the mix-and-match attack: *"It is possible to create a FIT with the same signed images, but with the configuration changed such that a different one is selected."* Valid images from different releases can be recombined into a configuration that was never intended to exist.
+- The first is the mix-and-match attack: *"It is possible to create a FIT with the same signed images, but with the configuration changed such that a different one is selected."* Valid images can be recombined into a configuration that was never intended to exist.
 
 - The second is the rollback attack: *"It is also possible to substitute a signed image from an older FIT version into a newer FIT."* A correctly signed but outdated kernel can therefore be brought back after a vulnerability has already been fixed.
 
-As the U-Boot documentation puts it: *"It is the configurations that are signed, not the image. Each image has its own hash and we include the hash in the configuration signature."*
-
-Signing the configuration prevents the mix-and-match attack because the configuration and the hashes of its referenced images are signed together. However, a configuration signature by itself does not prevent rollback. An older FIT with a valid signature is still cryptographically valid, so preventing rollback requires an additional version or rollback protection mechanism that rejects older images.
+Signing the configuration prevents both, because one signature covers the configuration and the hashes of the images it references, and changing either breaks it. What this does not prevent is replaying an older FIT as a whole. That FIT was validly signed when it was built and remains cryptographically valid, so rejecting it requires a separate version or rollback protection mechanism.
 
 ## Why the FIT lives in a raw partition
 
-The default BSP uses [`imx-imx-boot-bootpart.wks.in`](https://git.yoctoproject.org/meta-freescale/tree/files/wic/imx-imx-boot-bootpart.wks.in?h=wrynose), which creates a 256 MiB VFAT `/boot` partition. In that layout, the FIT image is stored as a file and loaded with `load mmc`. In this guide, the FIT instead resides in its own raw partition and is loaded directly with `mmc read`.
+The default BSP uses [`imx-imx-boot-bootpart.wks.in`](https://git.yoctoproject.org/meta-freescale/tree/files/wic/imx-imx-boot-bootpart.wks.in?h=wrynose), which creates a 256 MiB VFAT `/boot` partition. Holding the FIT there would mean storing it as a file and loading it with `fatload mmc`. In this part, the FIT instead resides in its own raw partition and is loaded directly with `mmc read`.
 
 One reason is to minimize the amount of code that processes untrusted data before signature verification. With a filesystem based boot partition, U-Boot must first parse the FAT filesystem and its metadata before it can locate the FIT image. A raw partition removes filesystem parsing from this pre-verification path, reducing the amount of code that handles attacker controlled data before the FIT signature is verified. The cryptographic guarantees remain the same but considerably less code is involved before the FIT signature is checked.
 
 A raw partition also improves robustness. Because it contains only the FIT image, there is no filesystem metadata that can become inconsistent if power is lost during an update. The FIT itself can still be left partially written by an interrupted update but there is no additional filesystem state that U-Boot must parse or recover from.
 
-The trade-off is that the partition layout must stay synchronized between the `.wks` file and the U-Boot environment. With a filesystem based `/boot` partition, U-Boot only needs a partition number and file name. With a raw partition, it must also know the partition's start block and size. In practice, this is a small maintenance cost for a simpler, more deterministic and easier to audit boot path.
+The trade-off is that the partition layout has to stay synchronized with the U-Boot environment. With a filesystem based `/boot` partition, U-Boot only needs a partition number and file name. With a raw partition, it needs the start block and block count instead. In practice, this is a small maintenance cost for a simpler, more deterministic and easier to audit boot path.
 
 ## 1. Create the FIT signing key
 
-The first thing we need is the key that will sign the FIT image. This is a new key, separate from the SRKs (Super Root Keys). Reusing the SRKs may seem like the obvious choice but they serve different purposes. The SRKs anchor the hardware root of trust. The FIT signing key has a narrower role. Its private half signs the FIT image during the build and only the corresponding public key is embedded in U-Boot's control device tree. Keeping the FIT signing key separate from the SRKs limits the impact of a compromise. If the FIT signing key is compromised, it can simply be replaced by deploying a new U-Boot with an updated control device tree. If the SRK private keys are compromised, there is no equivalent field update because the fused SRK hash is immutable.
+The first thing we need is the key that will sign the FIT image. This is a new key, separate from the SRKs (Super Root Keys). Reusing the SRKs may seem like the obvious choice but they serve different purposes. The SRKs are the keys the device is fused to trust for its entire life. The FIT signing key has a narrower role. Its private half signs the FIT image during the build and only the corresponding public key is embedded in U-Boot's control device tree. Keeping the FIT signing key separate from the SRKs limits the impact of a compromise. If the FIT signing key is compromised, it can simply be replaced by deploying a new U-Boot with an updated control device tree. If the SRK private keys are compromised, there is no equivalent field update because the fused SRK hash is immutable.
 
-> **Production note.** For simplicity, this guide stores the FIT signing key on the development machine. In production, private signing keys are typically generated and protected inside a Hardware Security Module (HSM) and accessed through interfaces such as PKCS#11, so the private keys do not leave the secure hardware. Depending on the release process, image signing may be performed as a dedicated release step or directly from the Yocto build if PKCS#11 integration is available.
+> **Production note.** For simplicity, this part stores the FIT signing key on the development machine. In production, private signing keys are typically generated and protected inside a Hardware Security Module (HSM) and accessed through interfaces such as PKCS#11, so the private keys do not leave the secure hardware. Depending on the release process, image signing may be performed as a dedicated release step or directly from the Yocto build if PKCS#11 integration is available.
 
-Create the FIT signing key inside the same `artifacts-and-tools` directory we created in [section 9 of Part 1](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/#9-create-the-srks-super-root-keys). Keeping the FIT signing key together with the other generated artifacts keeps the generated keys and signing artifacts in one place.
+Create the FIT signing key inside the same `artifacts-and-tools` directory we created in [section 9 of Part 1](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/#9-create-the-srks-super-root-keys), keeping it together with the other generated artifacts.
 
 ```bash
 mkdir -p fit-keys
@@ -166,7 +166,7 @@ Private-Key: (4096 bit, 2 primes)
 
 ## 2. Enable FIT verification and replace the boot command
 
-In [section 8 of Part 1](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/#8-enable-ahab-in-u-boot-and-read-ahab_status), we created `secure-boot.cfg` to enable AHAB support:
+In [section 8 of Part 1](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/#8-enable-ahab-in-u-boot-and-read-ahab_status), we created `secure-boot.cfg` to enable AHAB support:
 
 ```bash
 CONFIG_AHAB_BOOT=y
@@ -176,7 +176,7 @@ We now extend the same configuration fragment to enable FIT signature verificati
 
 ```bash
 cat > ../sources/meta-frdm-imx93-security/recipes-bsp/u-boot/u-boot-imx/secure-boot.cfg <<'EOF'
-# Enable AHAB  boot support.
+# Enable AHAB boot support.
 CONFIG_AHAB_BOOT=y
 
 # Enable FIT image support and RSA signature verification.
@@ -212,13 +212,11 @@ Each stage conflicts with the verified FIT boot flow we are building:
 | `bootflow scan -lb` | Scans boot devices for EFI, extlinux or boot scripts and boots the first valid one it finds. | It can bypass the verified boot path entirely by booting whatever it discovers before our logic is reached. |
 | `run bsp_bootcmd` | Executes the BSP's standard boot logic. | It expects either an unsigned `boot.scr` or a raw `Image`. If AHAB is enabled, it expects a signed OS container (`os_cntr_signed.bin`). Our design uses none of these, we want to boot a signed FIT image directly from a dedicated raw partition. |
 
-One important point is worth mentioning. Replacing `CONFIG_BOOTCOMMAND` changes only U-Boot's compiled-in default environment. If a persistent environment has been saved, it takes precedence over the compiled-in defaults. The saved copy is protected by a CRC32, which catches corruption but not tampering, because anyone able to write that area can compute a matching checksum. On this board, the environment is stored in writable eMMC, so a signed FIT image alone does not protect the boot command from being modified. Hardening the U-Boot environment is a separate topic and outside the scope of this guide.
-
 ### Defining what the boot command runs
 
 The default U-Boot environment is defined in the board environment file, [`board/nxp/imx93_frdm/imx93_frdm.env`](https://github.com/nxp-imx/uboot-imx/blob/6eeef838dac4ddbc06ff14450531a95e8c5cb346/board/nxp/imx93_frdm/imx93_frdm.env#L87).
 
-This is the one place in this guide that needs a patch rather than a `.cfg` fragment. The boot command needs control flow and an error path, which do not fit naturally into a Kconfig string. The patch itself is kept small on purpose and explains each of its choices in its own comments.
+This is the one place in this series that needs a patch rather than a `.cfg` fragment. The boot command needs control flow and an error path, which do not fit naturally into a Kconfig string. The patch itself is kept small on purpose and explains each of its choices in its own comments.
 
 ```bash
 cat > ../sources/meta-frdm-imx93-security/recipes-bsp/u-boot/u-boot-imx/0001-imx93_frdm-add-secure_bootcmd-for-FIT-boot.patch <<'EOF'
@@ -235,14 +233,14 @@ Upstream-Status: Inappropriate [product specific boot configuration]
 
 Signed-off-by: Alper Ak <alperyasinak1@gmail.com>
 ---
- board/nxp/imx93_frdm/imx93_frdm.env | 41 +++++++++++++++++++++++++++++
- 1 file changed, 41 insertions(+)
+ board/nxp/imx93_frdm/imx93_frdm.env | 42 +++++++++++++++++++++++++++++
+ 1 file changed, 42 insertions(+)
 
 diff --git a/board/nxp/imx93_frdm/imx93_frdm.env b/board/nxp/imx93_frdm/imx93_frdm.env
 index 8dee8b63ba4..624ff7b3931 100644
 --- a/board/nxp/imx93_frdm/imx93_frdm.env
 +++ b/board/nxp/imx93_frdm/imx93_frdm.env
-@@ -107,3 +107,44 @@ bsp_bootcmd=
+@@ -107,3 +107,45 @@ bsp_bootcmd=
  		fi;
  	fi;
  scriptaddr=0x83500000
@@ -255,7 +253,8 @@ index 8dee8b63ba4..624ff7b3931 100644
 + * CONFIG_BOOTCOMMAND points to "run secure_bootcmd", bypassing the BSP's
 + * default boot flow.
 + *
-+ * fit_blk and fit_cnt must match the FIT partition defined in the .wks file.
++ * fit_blk and fit_cnt must match the FIT partition defined in
++ * frdm-imx93-secure.wks.in.
 + *
 + *      fit_blk = 0x4000  -> 8 MiB offset (512 byte MMC blocks)
 + *      fit_cnt = 0x20000 -> 64 MiB partition size
@@ -318,7 +317,7 @@ Whenever the kernel configuration changes, check the size of the uncompressed ke
 
 ## 3. Create the partition layout
 
-The default BSP `.wks` file ([imx-imx-boot-bootpart.wks.in](https://git.yoctoproject.org/meta-freescale/tree/files/wic/imx-imx-boot-bootpart.wks.in?h=wrynose)) creates a 256 MiB VFAT `/boot` partition. Our design replaces it with a dedicated raw partition for the FIT image and explicitly reserves the U-Boot environment area instead of leaving it as an unnamed gap, so we need a custom partition layout. Rather than modifying the BSP file directly, we create our own `.wks` file.
+The default BSP partition layout ([`imx-imx-boot-bootpart.wks.in`](https://git.yoctoproject.org/meta-freescale/tree/files/wic/imx-imx-boot-bootpart.wks.in?h=wrynose)) creates a 256 MiB VFAT `/boot` partition. Our design replaces it with a dedicated raw partition for the FIT image and explicitly reserves the U-Boot environment area instead of leaving it as an unnamed gap. Rather than modifying the BSP file directly, we create our own.
 
 ```bash
 mkdir -p ../sources/meta-frdm-imx93-security/files/wic
@@ -356,7 +355,7 @@ cat > ../sources/meta-frdm-imx93-security/files/wic/frdm-imx93-secure.wks.in <<'
 # The offsets are therefore explicit. Alignment only rounds the current
 # position up to the requested boundary, so a larger image before an aligned
 # partition can silently move that partition. An explicit --offset instead
-# makes wic fail if the requested location is already occupied.
+# makes Wic fail if the requested location is already occupied.
 #
 # U-Boot writes only CONFIG_ENV_SIZE = 0x4000 bytes (16 KiB) into the 1 MiB
 # reserved for the environment. If the environment layout or size changes,
@@ -372,7 +371,7 @@ cat > ../sources/meta-frdm-imx93-security/files/wic/frdm-imx93-secure.wks.in <<'
 part imx-boot   --source rawcopy --sourceparams="file=imx-boot.tagged" --ondisk mmcblk0 --no-table --align ${IMX_BOOT_SEEK}
 
 # Reserves the area saveenv writes to. It holds no data and gets no partition
-# table entry. If imx-boot ever grew beyond 7 MiB, wic would fail here instead
+# table entry. If imx-boot ever grew beyond 7 MiB, Wic would fail here instead
 # of producing an image whose bootloader overlaps the environment.
 part u-boot-env --ondisk mmcblk0 --no-table --offset 7M --fixed-size 1M
 
@@ -385,20 +384,21 @@ part fit        --source rawcopy --sourceparams="file=fitImage" --ondisk mmcblk0
 # starts, so it follows the FIT partition rather than being pinned.
 part /          --source rootfs --ondisk mmcblk0 --fstype=ext4 --label root --align 8192
 
-# An MBR partition table rather than GPT.
-bootloader --ptable msdos
+# A GPT partition table. It gives every partition a name and a stable GUID,
+# neither of which MBR supports.
+bootloader --ptable gpt
 EOF
 ```
 
-The `.wks` file references `imx-boot.tagged` rather than `flash_singleboot`. The Yocto BSP generates this file automatically by appending a **40-byte trailer** containing the bootable image size to `flash_singleboot`.
+`frdm-imx93-secure.wks.in` references `imx-boot.tagged` rather than `flash_singleboot`. The Yocto BSP generates this file automatically by appending a **40-byte trailer** containing the bootable image size to `flash_singleboot`.
 
 The trailer lets `uuu` locate the bootable image inside a standalone disk image such as a `.wic` file. If you give `uuu` only a `.wic`, without a separate bootloader file, it has to extract the bootable image from inside the `.wic`, load it into RAM and use it to bring up Fastboot. The trailer tells it where that image ends. You still flash `flash_singleboot` itself, `imx-boot.tagged` is only used when embedding the bootable image into the `.wic`.
 
-A practical note is worth keeping in mind. This partition is sized for the FIT image, not the kernel. The kernel is gzip compressed inside the FIT, so our 34 MiB uncompressed kernel results in a 15.5 MiB FIT image. A 64 MiB partition therefore leaves comfortable room for future additions such as an initramfs. The uncompressed kernel size has a separate limit but that limit is about RAM, not storage. A larger FIT image does not reduce that space. The kernel expands upward from `0x80400000` toward the FIT staging address, while the staged FIT occupies `fit_cnt` bytes upward from `0x83000000` into free memory. Only a growing kernel can close this gap and eventually overwrite the staged FIT.
+A practical note is worth keeping in mind. This partition is sized for the FIT image, not the kernel. The kernel is gzip compressed inside the FIT, which the next section sets with `FIT_KERNEL_COMP_ALG`, so our 34 MiB uncompressed kernel results in a 15.5 MiB FIT image. A 64 MiB partition therefore leaves comfortable room for future additions such as an initramfs. The uncompressed kernel size has a separate limit but that limit is about RAM, not storage. A larger FIT image does not reduce that space. The kernel expands upward from `0x80400000` toward the FIT staging address, while the staged FIT occupies 64 MiB upward from `0x83000000` into free memory. Only a growing kernel can close this gap and eventually overwrite the staged FIT.
 
 ## 4. Add the FIT settings to the machine configuration
 
-In [section 4 of Part 1](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/#4-create-a-custom-machine-configuration), we created a custom machine configuration that contained only:
+In [section 4 of Part 1](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/#4-create-a-custom-machine-configuration), we created a custom machine configuration that contained only:
 
 ```bash
 require conf/machine/imx93-11x11-lpddr4x-frdm.conf
@@ -413,8 +413,9 @@ require conf/machine/imx93-11x11-lpddr4x-frdm.conf
 # Makes the kernel artifacts available to the `linux-yocto-fitimage` recipe that builds the FIT image.
 KERNEL_CLASSES += "kernel-fit-extra-artifacts"
 
-# Ensures `linux-yocto-fitimage` is built before `wic`, so `fitImage` is available when the disk image is assembled.
-WKS_FILE_DEPENDS:append = " linux-yocto-fitimage"
+# `frdm-imx93-secure.wks.in` refers to `fitImage` by file name and bitbake does
+# not turn that into a dependency, so the task that deploys it is named here.
+do_image_wic[depends] += "linux-yocto-fitimage:do_deploy"
 
 # Enables FIT signing and embeds the public key into U-Boot's control device tree, marked as `required`.
 UBOOT_SIGN_ENABLE  = "1"
@@ -427,14 +428,46 @@ UBOOT_SIGN_KEYNAME = "fit_signing_key"
 # Uses RSA-4096 signatures, matching the key generated in the previous section.
 FIT_SIGN_ALG = "rsa4096"
 
-# Explicitly selects SHA-256 for image hashes.
+# Explicitly selects SHA-256 for image hashes. This matches the default in
+# oe-core's `image-fitimage.conf`, pinned here so the hash algorithm used by
+# the signed FIT configuration is visible rather than inherited.
 FIT_HASH_ALG = "sha256"
 
-# Signs FIT configurations rather than individual images, following U-Boot's recommended model.
+# Leaves the image nodes carrying only hashes instead of signing each one too,
+# so the configuration signature is the only signature in the FIT. This is the
+# model U-Boot's documentation argues for, and the default in
+# `image-fitimage.conf`, pinned so the FIT matches the shape described above.
 FIT_SIGN_INDIVIDUAL = "0"
 
 # Selects the custom partition layout we created for raw FIT image.
 WKS_FILE = "frdm-imx93-secure.wks.in"
+
+# The kernel inside the FIT is gzip compressed by the default in
+# oe-core's `kernel-uboot.bbclass`. Unlike the settings above, this is a
+# compression choice rather than a security setting. The value determines how
+# the kernel is compressed at build time and is also used for the FIT kernel's
+# `compression` property, which tells U-Boot how to decompress it. The choice
+# trades boot time against image size. Keep the compression algorithm and file
+# extension consistent.
+#
+FIT_KERNEL_COMP_ALG            = "gzip"
+FIT_KERNEL_COMP_ALG_EXTENSION  = ".gz"
+
+# The kernel load and entry addresses inside the FIT are not set here on purpose.
+#
+# These are RAM addresses, not storage offsets. The FIT is staged at 0x83000000,
+# and `bootm` unpacks the compressed kernel out of it to the load address before
+# transferring execution to the entry point.
+#
+# meta-freescale already defines the entry point for this SoC in
+# `conf/machine/include/imx-base.inc`:
+#
+#   UBOOT_ENTRYPOINT:mx93-generic-bsp ?= "0x80400000"
+#
+# `UBOOT_LOADADDRESS` sets the load address. It has no machine override and only
+# a default of `${UBOOT_ENTRYPOINT}` in `uboot-config.bbclass`. Setting both
+# would therefore be unnecessary and could make the load and entry addresses
+# diverge. We leave both unset and inherit the defaults so they stay consistent.
 EOF
 ```
 
@@ -457,7 +490,8 @@ The build now generates the signed FIT image and the new bootable image. It asse
 
 ## 6. Verify the FIT signature before you flash
 
-Before writing anything to the board, verify that the generated FIT image is correctly signed and that its configuration signature can be verified with the FIT public key embedded in U-Boot's control device tree. 
+Before writing anything to the board, verify that the generated FIT image is correctly signed and that its configuration signature can be verified with the FIT public key embedded in U-Boot's control device tree.
+
 U-Boot provides a host utility called `fit_check_sign` for this purpose. It is built alongside `mkimage` under `tools/fit_check_sign` in the U-Boot build directory.
 
 The verification requires two files:
@@ -473,23 +507,21 @@ export UBOOT_BUILD="$(pwd)/tmp/work/frdm_imx93_secure-poky-linux/u-boot-imx/2026
 $UBOOT_BUILD/tools/fit_check_sign -k u-boot.dtb -f fitImage
 ```
 
-The important line in the output is:
+The important part of the output is:
 
 ```console
 sha256,rsa4096:fit_signing_key+
 ```
 
-The `sha256,rsa4096:fit_signing_key+` line confirms that the FIT configuration signature was successfully verified using the embedded FIT public key. The trailing `+` indicates successful signature verification.
+This indicates a successful verification using the required FIT public key in the provided control device tree. The trailing `+` marks a successful verification attempt, while `-` marks a failed attempt. The line may appear more than once while `fit_check_sign` processes the selected configuration and the images referenced by it.
 
-Do not rely on the final `Signature check OK` message alone. The tool can print that message and exit with status 0 even when the supplied device tree contains no FIT public key. In that case, it only checks the image hashes and does not perform signature verification.
-
-If `sha256,rsa4096:fit_signing_key+` line is missing, the build may still have completed successfully but the FIT configuration signature is not being verified against the public key embedded in U-Boot. In that case, U-Boot will reject the FIT image during boot.
+Do not rely on the final `Signature check OK` message alone. If the provided control device tree contains no public key marked `required = "conf"`, there is no required configuration signature for the tool to enforce and it can still finish successfully after checking the image hashes. In that case, the `sha256+` output for the kernel, device tree or initramfs confirms that the image data matches the hashes stored in the FIT but it does not provide authenticity.
 
 ## 7. Sign the bootable image
 
 Embedding the FIT public key modifies U-Boot's control device tree, which changes the U-Boot binary itself. The build then produces a new bootable image and it must be signed.
 
-Copy the generated `imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot` from the deploy directory into the `artifacts-and-tools` directory we created in [section 9 of Part 1](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/#9-create-the-srks-super-root-keys), alongside `sign_config.yaml`, then run:
+Copy the generated `imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot` from the deploy directory into the `artifacts-and-tools` directory we created in [section 9 of Part 1](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/#9-create-the-srks-super-root-keys), alongside `sign_config.yaml`, then run:
 
 ```bash
 nxpimage -v ahab sign \
@@ -497,23 +529,21 @@ nxpimage -v ahab sign \
     -b imx-boot-frdm-imx93-secure-sd.bin-flash_singleboot \
     -o signed-flash.bin \
     --force
-
-nxpimage -v ahab verify -f mimx9352 -b signed-flash.bin
 ```
 
-The signing process itself is unchanged. We still use the same SRKs and the same `sign_config.yaml`. The only difference is that the bootable image now contains an updated U-Boot with the embedded FIT public key.
+The signing process itself is unchanged. We still use the same SRKs and the same `sign_config.yaml`.
 
 ## 8. Flash, boot and verify both stages
 
 At this point, two build artifacts are required for flashing:
 
 - `signed-flash.bin` which is the signed bootable image containing U-Boot with the embedded FIT public key.
-- `imx-image-core-frdm-imx93-secure.rootfs-<date>.wic.zst` which is the complete eMMC image containing the raw signed FIT partition and the root filesystem.
+- `imx-image-core-frdm-imx93-secure.rootfs-<timestamp>.wic.zst` which is the complete eMMC image containing the raw signed FIT partition and the root filesystem.
 
 Copy the generated `.wic.zst` image from the deploy directory into the same `artifacts-and-tools` directory if you want all flashing artifacts in one place. Set the board's boot mode switches to Serial Download Mode, power-cycle or reset the board and run `nxpuuu list-devices` from the host to confirm that the board is detected. Then flash the newly signed bootable image together with the new full system image:
 
 ```bash
-nxpuuu write -b emmc_all signed-flash.bin imx-image-core-frdm-imx93-secure.rootfs-<date>.wic.zst
+nxpuuu write -b emmc_all signed-flash.bin imx-image-core-frdm-imx93-secure.rootfs-<timestamp>.wic.zst
 ```
 
 Once flashing completes, return the boot mode switches to eMMC boot and power-cycle or reset the board and let the system boot normally.
@@ -637,7 +667,7 @@ The important detail is that the FIT configuration signature still verifies succ
 
 ### Test 2: An unsigned FIT
 
-The first test proved that the kernel payload inside a signed FIT cannot be modified. This test verifies a different property: U-Boot refuses to boot a FIT image that carries no signature at all. This is the purpose of the `required = "conf"` property added to U-Boot's control device tree.
+The first test proved that a modified kernel payload inside a signed FIT is detected. This test verifies a different property: U-Boot refuses to boot a FIT image that carries no signature at all. This is the purpose of the `required = "conf"` property added to U-Boot's control device tree.
 
 Build a FIT image without a signature node. `-f auto` tells `mkimage` to assemble the FIT automatically, so no `.its` file is needed. Instead, the kernel and device tree are provided directly with `-d` and `-b`. Both are referenced by relative path, so run the commands from the deploy directory that contains them. Adjust the `mkimage` path to match your build.
 
@@ -683,6 +713,8 @@ The failure occurs before U-Boot verifies either the kernel or the device tree b
 Generate a second RSA-4096 key and sign the same `.its` with that key instead of the trusted one. The key files must use the same basename as the original (`fit_signing_key`) because the `key-name-hint` property inside the `.its` determines the filenames to use, while `-k` only specifies the directory containing them.
 
 ```bash
+export MKIMAGE="$(pwd)/tmp/work/frdm_imx93_secure-poky-linux/u-boot-imx/2026.04/build/imx93_11x11_frdm_defconfig-sd/tools/mkimage"
+
 mkdir -p /tmp/untrusted-keys
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 \
@@ -732,13 +764,13 @@ All three tests operate entirely in RAM. The eMMC contents remain unchanged, so 
 
 ## 10. Move the device to the OEM Closed lifecycle
 
-In [section 15 of Part 1](/posts/secure-boot-on-the-frdm-imx93-part-1-the-bootloader-ahab/#15-the-final-step-closing-the-device-not-in-this-part), we left the device in the `OEM Open` lifecycle state on purpose. At that point, only the authentication of the OEM containers by the ELE firmware had been confirmed.
+In [section 15 of Part 1](/posts/embedded-linux-security-on-the-frdm-imx93-part-1-the-bootloader-chain-ahab/#15-the-final-step-closing-the-device-not-in-this-part), we left the device in the `OEM Open` lifecycle state on purpose.
 
 Now, this part completed the second stage of the secure boot chain by adding FIT signature verification in U-Boot and confirming that both stages correctly accept valid images. With the complete chain now verified end to end, the device can safely be transitioned to the `OEM Closed` lifecycle.
 
-> ⚠️ **Before closing the device:** Do not proceed if `ahab_status` reports any authentication events related to the current boot. In particular, verify that the device reports `No Events Found!` and that the fused OEM SRK hash matches the SRK table used to sign the bootable image. If the wrong SRK hash was programmed into the fuses or the corresponding signing keys are no longer available, closing the device make the board permanently unbootable. In `OEM Open`, authentication failures may still be reported without stopping the boot process. After transitioning to `OEM Closed`, those failures are enforced and the device will reject the image. Because the lifecycle transition is irreversible, there is no safe way to recover from closing a device that does not have a known good authenticated boot image and the corresponding signing keys.
+> ⚠️ **Before closing the device:** Do not proceed if `ahab_status` reports any authentication events related to the current boot. In particular, verify that the device reports `No Events Found!`. If the wrong SRK hash was programmed into the fuses or the corresponding signing keys are no longer available, closing the device makes the board permanently unbootable. In `OEM Open`, authentication failures may still be reported without stopping the boot process. After transitioning to `OEM Closed`, those failures are enforced and the device will reject the image. The transition is irreversible. There is no way back to `OEM Open` and no recovery mode that skips authentication.
 
-> ⚠️ **Before continuing:** Boot the board, interrupt autoboot, stop at the `u-boot=>` prompt and close your serial terminal. In this guide, `nxpele` communicates with U-Boot through the serial backend (`-d uboot_serial`) over `/dev/ttyACM0`, so the serial port must not be in use when the command is executed.
+> ⚠️ **Before continuing:** Boot the board, interrupt autoboot, stop at the `u-boot=>` prompt and close your serial terminal. In this series, `nxpele` communicates with U-Boot through the serial backend (`-d uboot_serial`) over `/dev/ttyACM0`, so the serial port must not be in use when the command is executed.
 
 Run:
 
@@ -755,7 +787,7 @@ A successful execution prints:
 Forward Lifecycle update ends successfully.
 ```
 
-After the command completes, reconnect to the serial console, interrupt autoboot if necessary and verify the new lifecycle state:
+After the command completes, reconnect to the serial console, reboot and interrupt autoboot if necessary and verify the new lifecycle state:
 
 ```console
 u-boot=> ahab_status
@@ -764,13 +796,13 @@ Lifecycle: 0x00000020, OEM closed
         No Events Found!
 ```
 
-`OEM Closed` confirms that the lifecycle transition completed successfully, while `No Events Found!` confirms that the ELE firmware has no authentication events to report for the current boot. The board should also continue booting normally, showing that the ELE firmware still authenticates the OEM containers successfully and that U-Boot can still verify the signed FIT image.
+`OEM Closed` confirms that the lifecycle transition completed successfully, while `No Events Found!` confirms that the ELE firmware has no authentication events to report for the current boot. The board should also continue booting normally.
 
 ### Enforcement also covers the USB recovery path
 
 Closing the device does not only protect the eMMC boot path. Serial Download Mode is simply another boot path, not a way around secure boot. Before Fastboot can write anything, `uuu` must first boot the bootable image it transfers to the board and the ELE firmware authenticates that image exactly the same way as when booting from eMMC.
 
-To demonstrate this, generate a second set of SRKs (Super Root Keys) with `nxpcrypto`. Be careful not to overwrite the SRKs you previously generated and used for programming the fuses. If those keys are lost or overwritten, you no longer be able to sign bootable images that existing devices will accept, which leave the device permanently **bricked**. Then update `sign_config.yaml` to use this second, untrusted set and sign the bootable image again:
+To demonstrate this, generate a second set of SRKs (Super Root Keys) with `nxpcrypto`. Be careful not to overwrite the SRKs you previously generated and used for programming the fuses. If those keys are lost or overwritten, you will no longer be able to sign bootable images that existing devices accept, which leaves the device permanently **bricked**. Then update `sign_config.yaml` to use this second, untrusted set and sign the bootable image again:
 
 ```bash
 for i in 0 1 2 3; do
@@ -811,15 +843,17 @@ This hands the image to the Boot ROM so that U-Boot can start and expose the Fas
 
 From this point onward, only bootable images whose OEM containers are signed with private keys corresponding to the SRK table whose hash matches the fused `OEM_SRKH` can boot or be used through the USB recovery path.
 
-## 11. Beyond this guide: what we did not cover
+## 11. Where we are and what comes next
 
-Secure boot is only one layer of a production security architecture. It establishes a chain of trust during boot but it does not by itself secure the system once Linux is running.
+The chain of trust now reaches the Linux kernel. The ELE firmware authenticates the OEM containers. U-Boot verifies the FIT configuration signature and the hashes of the images it protects. The device therefore rejects kernel images that are tampered with, unsigned or signed with an untrusted key.
 
-A production device should also consider:
+But the chain stops there. Once Linux mounts the root filesystem, nothing in this boot chain checks the integrity of the data read from it. System binaries, libraries and the init process are read from storage without an integrity check. If an attacker can modify the root filesystem on eMMC, the boot chain can still succeed while the system runs modified software.
 
-* **U-Boot hardening**, such as protecting the environment, disabling unnecessary commands, restricting console access and implementing rollback protection.
-* **Kernel hardening**, including a secure kernel configuration, module restrictions, memory protection features and attack surface reduction.
-* **Userspace hardening**, for example least-privilege services, read-only filesystems, SELinux or AppArmor and secure update mechanisms.
-* **Hardware and manufacturing security**, such as lifecycle management, debug interface lockdown, secure key storage and protection of signing keys in an HSM or other controlled key management system.
+Part 3 will close that gap with `dm-verity`. It provides runtime integrity verification for the read-only root filesystem by verifying data blocks on demand against a Merkle hash tree anchored to a trusted root hash.
 
-These topics are outside the scope of this guide, which focuses on building a complete secure boot chain with AHAB and FIT. They are also important for a production deployment and should be considered as part of a broader defense in depth strategy.
+Beyond this series, a production device should also consider:
+
+- **U-Boot hardening**, such as protecting the environment, disabling unnecessary commands, restricting console access and implementing rollback protection.
+- **Kernel hardening**, including a secure kernel configuration, module restrictions, memory protection features and attack surface reduction.
+- **Userspace hardening**, for example least privilege services, SELinux or AppArmor and secure update mechanisms.
+- **Hardware and manufacturing security**, such as lifecycle management, debug interface lockdown, secure key storage and protection of signing keys in an HSM or other controlled key management system.

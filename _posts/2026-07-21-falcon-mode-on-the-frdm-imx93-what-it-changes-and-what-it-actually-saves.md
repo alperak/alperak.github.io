@@ -1,8 +1,8 @@
 ---
 title: "Falcon Mode on the FRDM-IMX93: what it changes and what it actually saves"
 date: 2026-07-21 12:40:23 +0300
-categories: [Embedded Linux, U-Boot, Boot Time Optimization]
-tags: [embedded-linux, u-boot, boot-time-optimization]
+categories: [Embedded Linux, U-Boot]
+tags: [u-boot, boot-time-optimization, imx93, nxp, embedded-linux]
 ---
 
 Falcon Mode is often described as a way to cut boot time. But how much does it actually save? I enabled it on an FRDM-IMX93 (Yocto BSP lf-6.18.2, image imx-image-core, eMMC) and compared it against a normal boot, with everything else kept the same. The short answer is about 3.8 s off the bootloader. The rest of this post shows where that time goes and where it doesn’t.

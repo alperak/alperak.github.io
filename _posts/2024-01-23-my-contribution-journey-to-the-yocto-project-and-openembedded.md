@@ -1,8 +1,8 @@
 ---
 title: "My contribution journey to the Yocto Project and OpenEmbedded"
 date: 2024-01-23 15:51:43 +0300
-categories: [Embedded Linux, Open-Source, Yocto, Contribution]
-tags: [embedded-linux, yocto, open-source, contribution]
+categories: [Embedded Linux, Yocto]
+tags: [yocto, openembedded, open-source, contribution, embedded-linux]
 ---
 
 ![The Yocto Project logo over a photograph of snow-capped mountains](/assets/img/posts/my-contribution-journey-to-the-yocto-project-and-openembedded/1.png){: width="560" height="405" }

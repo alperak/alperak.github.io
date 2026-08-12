@@ -1,8 +1,8 @@
 ---
 title: "Open-Source in Action: OrangePi RV2 (RISC-V) Now Supported in the Yocto Project"
 date: 2025-07-01 11:36:59 +0300
-categories: [Embedded Linux, RISC-V, Yocto, Open-Source, Contribution]
-tags: [embedded-linux, riscv, yocto, open-source, contribution]
+categories: [Embedded Linux, Yocto]
+tags: [yocto, riscv, orangepi, open-source, contribution, embedded-linux]
 ---
 
 Over the last weeks, I dedicated myself to adding support for the RISC-V based OrangePi RV2 SBC (Single Board Computer) to the `meta-riscv` layer in the Yocto Project.
