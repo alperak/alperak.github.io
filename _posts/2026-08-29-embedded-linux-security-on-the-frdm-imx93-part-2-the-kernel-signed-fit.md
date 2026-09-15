@@ -849,7 +849,7 @@ The chain of trust now reaches the Linux kernel. The ELE firmware authenticates 
 
 But the chain stops there. Once Linux mounts the root filesystem, nothing in this boot chain checks the integrity of the data read from it. System binaries, libraries and the init process are read from storage without an integrity check. If an attacker can modify the root filesystem on eMMC, the boot chain can still succeed while the system runs modified software.
 
-Part 3 will close that gap with `dm-verity`. It provides runtime integrity verification for the read-only root filesystem by verifying data blocks on demand against a Merkle hash tree anchored to a trusted root hash.
+[Part 3](/posts/embedded-linux-security-on-the-frdm-imx93-part-3-the-root-filesystem-dm-verity/) will close that gap with dm-verity. It provides runtime integrity verification for the read-only root filesystem by verifying data blocks on demand against a hash tree anchored to a trusted root hash.
 
 Beyond this series, a production device should also consider:
 
@@ -857,3 +857,5 @@ Beyond this series, a production device should also consider:
 - **Kernel hardening**, including a secure kernel configuration, module restrictions, memory protection features and attack surface reduction.
 - **Userspace hardening**, for example least privilege services, SELinux or AppArmor and secure update mechanisms.
 - **Hardware and manufacturing security**, such as lifecycle management, debug interface lockdown, secure key storage and protection of signing keys in an HSM or other controlled key management system.
+
+Continue to [Part 3: The Root Filesystem (dm-verity)](/posts/embedded-linux-security-on-the-frdm-imx93-part-3-the-root-filesystem-dm-verity/)
