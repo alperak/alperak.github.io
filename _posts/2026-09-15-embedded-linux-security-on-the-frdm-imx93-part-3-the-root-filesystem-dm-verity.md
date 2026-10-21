@@ -502,4 +502,6 @@ The FIT key is trusted because the U-Boot control device tree containing that ke
 
 This part establishes the integrity boundary for the immutable system software. Making the root filesystem read-only means everything mutable has to live somewhere else. That storage holds writable state and may hold secrets, so what matters there is confidentiality rather than the integrity dm-verity provides.
 
-Part 4 will start there, with dm-crypt and a LUKS2 keyslot unlocked by a credential derived from hardware-backed key material through OP-TEE.
+[Part 4](/posts/embedded-linux-security-on-the-frdm-imx93-part-4-the-data-partition-dm-crypt-and-luks2/) will start there, with dm-crypt and a LUKS2 keyslot unlocked by a credential derived from hardware-backed key material through OP-TEE.
+
+Continue to [Part 4: The Data Partition (dm-crypt and LUKS2)](/posts/embedded-linux-security-on-the-frdm-imx93-part-4-the-data-partition-dm-crypt-and-luks2/)
